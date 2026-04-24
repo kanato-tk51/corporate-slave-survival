@@ -135,6 +135,7 @@ function App() {
   const [personSettingsState, setPersonSettingsState] = useState<PersonSettings>(() => loadPersonSettings());
   const [mutedState, setMutedState] = useState(false);
   const [guideOpenState, setGuideOpenState] = useState(false);
+  const [pausedState, setPausedState] = useState(false);
 
   const phaseRef = useRef<GamePhase>("ready");
   const statsRef = useRef<Stats>(INITIAL_STATS);
@@ -152,6 +153,8 @@ function App() {
   const personSettingsRef = useRef<PersonSettings>(personSettingsState);
   const guideOpenRef = useRef(false);
   const guideOpenedAtRef = useRef<number | null>(null);
+  const pausedRef = useRef(false);
+  const pauseStartedAtRef = useRef<number | null>(null);
 
   const setPhase = useCallback((phase: GamePhase) => {
     phaseRef.current = phase;
@@ -176,6 +179,29 @@ function App() {
     bestRecordRef.current = record;
     setBestRecordState(record);
   }, []);
+
+  const shiftGameClock = useCallback(
+    (pauseStartedAt: number, currentTime = performance.now()) => {
+      const pauseMs = currentTime - pauseStartedAt;
+      const currentStartedAt = startedAtRef.current;
+
+      if (currentStartedAt !== null) {
+        const adjustedStartedAt = currentStartedAt + pauseMs;
+        startedAtRef.current = adjustedStartedAt;
+        setStartedAt(adjustedStartedAt);
+      }
+
+      nextSpawnAtRef.current += pauseMs;
+      updateActiveTasks((previous) =>
+        previous.map((task) => ({
+          ...task,
+          spawnedAt: task.spawnedAt + pauseMs,
+        })),
+      );
+      setNow(currentTime);
+    },
+    [updateActiveTasks],
+  );
 
   const updatePersonSetting = useCallback((id: PersonId, patch: Partial<Pick<PersonSetting, "role" | "name" | "avatarId" | "imageSource" | "imageDataUrl">>) => {
     setPersonSettingsState((previous) => {
@@ -226,56 +252,110 @@ function App() {
       };
 
       const preset = presets[kind];
+      const start = context.currentTime;
+
+      if (kind === "end") {
+        const output = context.createDynamicsCompressor();
+        output.threshold.setValueAtTime(-18, start);
+        output.knee.setValueAtTime(18, start);
+        output.ratio.setValueAtTime(5, start);
+        output.attack.setValueAtTime(0.003, start);
+        output.release.setValueAtTime(0.28, start);
+        output.connect(context.destination);
+
+        const createNoiseBuffer = (duration: number) => {
+          const sampleCount = Math.floor(context.sampleRate * duration);
+          const noiseBuffer = context.createBuffer(1, sampleCount, context.sampleRate);
+          const samples = noiseBuffer.getChannelData(0);
+
+          for (let index = 0; index < sampleCount; index += 1) {
+            const decay = 1 - index / sampleCount;
+            samples[index] = (Math.random() * 2 - 1) * decay * decay;
+          }
+
+          return noiseBuffer;
+        };
+
+        const boom = context.createOscillator();
+        const boomGain = context.createGain();
+        boom.type = "sine";
+        boom.frequency.setValueAtTime(86, start);
+        boom.frequency.exponentialRampToValueAtTime(24, start + 0.72);
+        boomGain.gain.setValueAtTime(0.001, start);
+        boomGain.gain.exponentialRampToValueAtTime(0.19, start + 0.025);
+        boomGain.gain.exponentialRampToValueAtTime(0.001, start + 0.72);
+        boom.connect(boomGain);
+        boomGain.connect(output);
+        boom.start(start);
+        boom.stop(start + 0.74);
+
+        const thump = context.createOscillator();
+        const thumpGain = context.createGain();
+        thump.type = "triangle";
+        thump.frequency.setValueAtTime(152, start);
+        thump.frequency.exponentialRampToValueAtTime(42, start + 0.22);
+        thumpGain.gain.setValueAtTime(0.13, start);
+        thumpGain.gain.exponentialRampToValueAtTime(0.001, start + 0.24);
+        thump.connect(thumpGain);
+        thumpGain.connect(output);
+        thump.start(start);
+        thump.stop(start + 0.26);
+
+        const blast = context.createBufferSource();
+        const blastFilter = context.createBiquadFilter();
+        const blastGain = context.createGain();
+        blast.buffer = createNoiseBuffer(0.44);
+        blastFilter.type = "bandpass";
+        blastFilter.frequency.setValueAtTime(360, start);
+        blastFilter.Q.setValueAtTime(0.9, start);
+        blastGain.gain.setValueAtTime(0.26, start);
+        blastGain.gain.exponentialRampToValueAtTime(0.001, start + 0.44);
+        blast.connect(blastFilter);
+        blastFilter.connect(blastGain);
+        blastGain.connect(output);
+        blast.start(start);
+        blast.stop(start + 0.46);
+
+        const crack = context.createBufferSource();
+        const crackFilter = context.createBiquadFilter();
+        const crackGain = context.createGain();
+        crack.buffer = createNoiseBuffer(0.11);
+        crackFilter.type = "highpass";
+        crackFilter.frequency.setValueAtTime(1200, start);
+        crackGain.gain.setValueAtTime(0.18, start);
+        crackGain.gain.exponentialRampToValueAtTime(0.001, start + 0.11);
+        crack.connect(crackFilter);
+        crackFilter.connect(crackGain);
+        crackGain.connect(output);
+        crack.start(start);
+        crack.stop(start + 0.12);
+
+        const rumble = context.createBufferSource();
+        const rumbleFilter = context.createBiquadFilter();
+        const rumbleGain = context.createGain();
+        const rumbleStart = start + 0.09;
+        rumble.buffer = createNoiseBuffer(0.82);
+        rumbleFilter.type = "lowpass";
+        rumbleFilter.frequency.setValueAtTime(180, rumbleStart);
+        rumbleFilter.frequency.exponentialRampToValueAtTime(48, rumbleStart + 0.7);
+        rumbleGain.gain.setValueAtTime(0.075, rumbleStart);
+        rumbleGain.gain.exponentialRampToValueAtTime(0.001, rumbleStart + 0.8);
+        rumble.connect(rumbleFilter);
+        rumbleFilter.connect(rumbleGain);
+        rumbleGain.connect(output);
+        rumble.start(rumbleStart);
+        rumble.stop(rumbleStart + 0.84);
+
+        return;
+      }
+
       const oscillator = context.createOscillator();
       const gain = context.createGain();
-      const start = context.currentTime;
 
       oscillator.frequency.setValueAtTime(preset.frequency, start);
       oscillator.type = preset.type;
       gain.gain.setValueAtTime(preset.gain, start);
       gain.gain.exponentialRampToValueAtTime(0.001, start + preset.duration);
-
-      if (kind === "end") {
-        const sampleCount = Math.floor(context.sampleRate * 0.38);
-        const noiseBuffer = context.createBuffer(1, sampleCount, context.sampleRate);
-        const samples = noiseBuffer.getChannelData(0);
-
-        for (let index = 0; index < sampleCount; index += 1) {
-          const decay = 1 - index / sampleCount;
-          samples[index] = (Math.random() * 2 - 1) * decay;
-        }
-
-        const noise = context.createBufferSource();
-        const filter = context.createBiquadFilter();
-        const noiseGain = context.createGain();
-        const crack = context.createOscillator();
-        const crackGain = context.createGain();
-
-        noise.buffer = noiseBuffer;
-        filter.type = "lowpass";
-        filter.frequency.setValueAtTime(980, start);
-        filter.frequency.exponentialRampToValueAtTime(120, start + 0.34);
-        noiseGain.gain.setValueAtTime(0.16, start);
-        noiseGain.gain.exponentialRampToValueAtTime(0.001, start + 0.38);
-
-        crack.type = "square";
-        crack.frequency.setValueAtTime(210, start);
-        crack.frequency.exponentialRampToValueAtTime(48, start + 0.16);
-        crackGain.gain.setValueAtTime(0.055, start);
-        crackGain.gain.exponentialRampToValueAtTime(0.001, start + 0.18);
-
-        noise.connect(filter);
-        filter.connect(noiseGain);
-        noiseGain.connect(context.destination);
-        crack.connect(crackGain);
-        crackGain.connect(context.destination);
-
-        noise.start(start);
-        noise.stop(start + 0.4);
-        crack.start(start);
-        crack.stop(start + 0.18);
-        oscillator.frequency.exponentialRampToValueAtTime(34, start + preset.duration);
-      }
 
       oscillator.connect(gain);
       gain.connect(context.destination);
@@ -312,7 +392,10 @@ function App() {
       updateActiveTasks(() => []);
       guideOpenRef.current = false;
       guideOpenedAtRef.current = null;
+      pausedRef.current = false;
+      pauseStartedAtRef.current = null;
       setGuideOpenState(false);
+      setPausedState(false);
       setPhase("ended");
       addLog(`${finalResult.title} / スコア ${finalResult.score}`, reason === "survived" ? "good" : "bad");
       playSound("end");
@@ -331,11 +414,14 @@ function App() {
     fireWarningRef.current = false;
     guideOpenRef.current = false;
     guideOpenedAtRef.current = null;
+    pausedRef.current = false;
+    pauseStartedAtRef.current = null;
     setStatsState(INITIAL_STATS);
     setActiveTasksState([]);
     setHandledCountState(0);
     setMissedCountState(0);
     setGuideOpenState(false);
+    setPausedState(false);
     setStartedAt(null);
     setNow(0);
     setLogs([]);
@@ -389,6 +475,10 @@ function App() {
         return;
       }
 
+      if (pausedRef.current) {
+        return;
+      }
+
       const exists = activeTasksRef.current.some((activeTask) => activeTask.id === task.id);
       if (!exists) {
         return;
@@ -427,6 +517,45 @@ function App() {
     [addLog, playSound, updateActiveTasks, updateStats],
   );
 
+  const pauseGame = useCallback(() => {
+    if (phaseRef.current !== "playing" || pausedRef.current || guideOpenRef.current) {
+      return;
+    }
+
+    const currentTime = performance.now();
+    pausedRef.current = true;
+    pauseStartedAtRef.current = currentTime;
+    setPausedState(true);
+    setNow(currentTime);
+    addLog("一時停止中。", "neutral");
+  }, [addLog]);
+
+  const resumeGame = useCallback(() => {
+    if (!pausedRef.current) {
+      return;
+    }
+
+    const pauseStartedAt = pauseStartedAtRef.current;
+
+    if (phaseRef.current === "playing" && pauseStartedAt !== null) {
+      shiftGameClock(pauseStartedAt);
+    }
+
+    pausedRef.current = false;
+    pauseStartedAtRef.current = null;
+    setPausedState(false);
+    addLog("勤務再開。", "neutral");
+  }, [addLog, shiftGameClock]);
+
+  const togglePause = useCallback(() => {
+    if (pausedRef.current) {
+      resumeGame();
+      return;
+    }
+
+    pauseGame();
+  }, [pauseGame, resumeGame]);
+
   const openGuide = useCallback(() => {
     if (phaseRef.current !== "playing" || guideOpenRef.current) {
       return;
@@ -448,28 +577,15 @@ function App() {
 
     if (phaseRef.current === "playing" && pauseStartedAt !== null) {
       const pauseMs = currentTime - pauseStartedAt;
-      const currentStartedAt = startedAtRef.current;
-
-      if (currentStartedAt !== null) {
-        const adjustedStartedAt = currentStartedAt + pauseMs;
-        startedAtRef.current = adjustedStartedAt;
-        setStartedAt(adjustedStartedAt);
+      if (pauseMs > 0) {
+        shiftGameClock(pauseStartedAt, currentTime);
       }
-
-      nextSpawnAtRef.current += pauseMs;
-      updateActiveTasks((previous) =>
-        previous.map((task) => ({
-          ...task,
-          spawnedAt: task.spawnedAt + pauseMs,
-        })),
-      );
-      setNow(currentTime);
     }
 
     guideOpenRef.current = false;
     guideOpenedAtRef.current = null;
     setGuideOpenState(false);
-  }, [updateActiveTasks]);
+  }, [shiftGameClock]);
 
   useEffect(() => {
     mutedRef.current = mutedState;
@@ -519,7 +635,7 @@ function App() {
         return;
       }
 
-      if (guideOpenRef.current) {
+      if (guideOpenRef.current || pausedRef.current) {
         return;
       }
 
@@ -635,6 +751,9 @@ function App() {
             <button className="menu-button" type="button" onClick={openGuide}>
               効果一覧
             </button>
+            <button className={`menu-button pause-button ${pausedState ? "active" : ""}`} type="button" onClick={togglePause}>
+              {pausedState ? "再開" : "一時停止"}
+            </button>
             <button className="menu-button home-button" type="button" onClick={returnHome}>
               ホーム
             </button>
@@ -659,6 +778,7 @@ function App() {
             />
           </div>
 
+          {pausedState && !guideOpenState && <PauseOverlay onHome={returnHome} onResume={resumeGame} />}
           {guideOpenState && <GuideOverlay personSettings={personSettingsState} onClose={closeGuide} onHome={returnHome} />}
         </section>
       )}
@@ -1153,6 +1273,25 @@ function EffectPills({ effect, noneLabel = "変化なし" }: { effect: StatDelta
           {value}
         </span>
       ))}
+    </div>
+  );
+}
+
+function PauseOverlay({ onHome, onResume }: { onHome: () => void; onResume: () => void }) {
+  return (
+    <div className="pause-overlay" role="dialog" aria-modal="true" aria-label="一時停止">
+      <div className="pause-modal">
+        <p className="eyebrow">Paused</p>
+        <strong>一時停止中</strong>
+        <div className="pause-actions">
+          <button className="primary-button" type="button" onClick={onResume}>
+            再開
+          </button>
+          <button className="secondary-button" type="button" onClick={onHome}>
+            ホームへ
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
